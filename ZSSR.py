@@ -18,11 +18,13 @@ CONV_KERNEL_SIZE = 3
 INPUT_CHANNELS = 1
 CONV_CHANNELS = 64
 CONV_LAYERS_NUM = 8
-ITERATIONS = 50
-INTER_SCALES_NUM = 2
-MAX_DOWNSCALE_FATHERS = 0.2
-DOWNSCALE_FATHERS_NUM = 2
-CROP_SIZE = 128
+ITERATIONS = 200
+INTER_SCALES_NUM = 6
+# MAX_DOWNSCALE_FATHERS = 0.2
+MAX_DOWNSCALE_FATHERS = 0.4
+DOWNSCALE_FATHERS_NUM = 6
+# CROP_SIZE = 128
+CROP_SIZE = 64
 
 #IMAGE PROCESSING
 DOWN_SAMPLING_METHOD = cv2.INTER_AREA
@@ -227,7 +229,7 @@ def conv_layer(input_tensor, shape, stride=1, pad = 'SAME', act=tf.nn.relu, name
 
 def L1_loss(HR_prediction, HR_truth):
     # return L1 loss
-    return tf.reduce_sum(tf.abs(HR_prediction - HR_truth))
+    return tf.reduce_mean(tf.abs(HR_prediction - HR_truth))
 
 def forward_prop(LR):
     # perform forward propogation on LR HR pairs, returns output images
@@ -250,62 +252,19 @@ def forward_prop(LR):
 
     return output
 
-
-# def train_optimize(LR_data, HR_truth_data, sess, init, train_writer=None):
-def train_optimize(LR_data, HR_truth_data, sess, train_writer):
-    # optimize function for specific s
-    # input is already interpolated and cropped to output size (I^s)
-    #
-    # forward_prop of LR
-    # cost from L1_loss
-    # performs iterations of training step
-
-    # here or in train_optimize? :
-    LR = tf.placeholder(tf.float32, shape=[None, CROP_SIZE, CROP_SIZE, INPUT_CHANNELS])
-    HR_truth = tf.placeholder(tf.float32, shape=[None, CROP_SIZE, CROP_SIZE, INPUT_CHANNELS])
-
-
-
-    HR_predictions = forward_prop(LR)
-    with tf.name_scope('L1_loss'):
-        loss = L1_loss(HR_predictions, HR_truth)
-        tf.summary.scalar('L1_loss', loss)
-    with tf.name_scope('adam_optimizer'):
-        train_step = tf.train.AdamOptimizer(1e-4).minimize(loss)
-
-    #TB:
-    merged = tf.summary.merge_all() # maybe should be outside of function
-
-    sess.run(tf.global_variables_initializer())
-    # TODO check if sess gets reinitializeed
-
-    # sess.run(init)
-
-    for i in range(ITERATIONS):
-        sess.run(train_step, feed_dict={LR: LR_data, HR_truth: HR_truth_data})
-
-        # if i % 100 == 0:
-        if i % 1 == 0:
-            loss_empirical = sess.run(loss, feed_dict={LR: LR_data, HR_truth: HR_truth_data})
-            # TB:
-            summary = sess.run(merged, feed_dict={LR: LR_data, HR_truth: HR_truth_data})
-            train_writer.add_summary(summary, i)
-            print("Iteration {}, train cost: {}".format(i,loss_empirical))
-
-
-
-
-def produce_test_image(I, scale, sess):
+def produce_test_image(I, scale):
     # interpolate image to scale
     # create d_4 group
     # forward_prop each member of group
     # unify outputs - rotate and flip back, perform median (separate function?)
-
-    I_upscaled = upscale_to_size(I, scale)
+    I_upscaled = cv2.resize(I, None, fx=scale, fy=scale, interpolation=UP_SAMPLING_METHOD)
+    I_upscaled = np.expand_dims(I_upscaled,axis=0)
+    I_upscaled = np.expand_dims(I_upscaled,axis=3)
+    # I_upscaled = upscale_to_size(I, scale)
 
     I_SR = forward_prop(I_upscaled)
 
-    return I_SR
+    return I_SR[0,:,:,0]
 
     # I_rotated_flipped = rotations_and_flips(I_upscaled)
     # I_forward_proped = []
@@ -327,6 +286,8 @@ def ZSSR(image_path, desired_scale, verbose = False):
     #   produce_test_image
     #   update training set
 
+    t0 = time()
+
     source_image = load_image(image_path)
     father_scale_list = np.linspace(1,MAX_DOWNSCALE_FATHERS, DOWNSCALE_FATHERS_NUM)[1:]
 
@@ -340,8 +301,13 @@ def ZSSR(image_path, desired_scale, verbose = False):
     print("Timestamp: {}".format(timestamp))
     logs_path = "./logs/" + timestamp + "/"
 
-    LR = tf.placeholder(tf.float32, shape=[None, CROP_SIZE, CROP_SIZE, INPUT_CHANNELS])
+    # LR = tf.placeholder(tf.float32, shape=[None, CROP_SIZE, CROP_SIZE, INPUT_CHANNELS])
     HR_truth = tf.placeholder(tf.float32, shape=[None, CROP_SIZE, CROP_SIZE, INPUT_CHANNELS])
+
+    LR = tf.placeholder(tf.float32, shape=[None, None, None, INPUT_CHANNELS])
+
+
+    # test_image_placeholder = tf.placeholder(tf.float32, shape=[1,None, None, 1])
 
     with tf.name_scope('train'):
         HR_predictions = forward_prop(LR)
@@ -351,23 +317,27 @@ def ZSSR(image_path, desired_scale, verbose = False):
         with tf.name_scope('adam_optimizer'):
             train_step = tf.train.AdamOptimizer(1e-4).minimize(loss)
 
+
+    #     with tf.name_scope('test'):
+    #         current_image_placeholder = forward_prop(test_image_placeholder)
+
     # TB:
     merged = tf.summary.merge_all()
 
     with tf.Session() as sess:
-    # if True:
-        # TB:
         train_writer = tf.summary.FileWriter(logs_path, sess.graph)
-        # train_writer = tf.summary.FileWriter(logs_path) # maybe in function
+
 
         sess.run(tf.global_variables_initializer())
 
         current_image = source_image.copy()
 
+        last_scale = 1.0
+        HR_fathers_list = []
         for current_scale in interscale_list:
             # with tf.name_scope('interscale_{}'.format(current_scale)):
-            HR_fathers_list = create_HR_fathers(current_image, father_scale_list)
-            # TODO add old fathers
+            HR_fathers_list = HR_fathers_list + create_HR_fathers(current_image, father_scale_list)
+
 
             if verbose:
                 print("fathers shapes:")
@@ -400,11 +370,32 @@ def ZSSR(image_path, desired_scale, verbose = False):
                     # TB:
                     summary = sess.run(merged, feed_dict={LR: LR_sons_cropped_tensor, HR_truth: HR_fathers_cropped_tensor})
                     train_writer.add_summary(summary, i)
-                    print("Iteration {}, train cost: {}".format(i, loss_empirical))
+                    print("Iteration {}, time elapsed: {} seconds, train cost: {}".format(i, time()- t0 ,loss_empirical))
+
+            I_upscaled = cv2.resize(current_image, None, fx=current_scale/last_scale, fy=current_scale/last_scale, interpolation=UP_SAMPLING_METHOD)
+            I_upscaled = np.expand_dims(I_upscaled, axis=0)
+            I_upscaled = np.expand_dims(I_upscaled, axis=3)
+
+            last_scale = current_scale # to calculate correct scaling of current_image
+
+            current_image = sess.run(HR_predictions, feed_dict={LR: I_upscaled})
+
+            # #deal with negative values:
+            # image_min = np.min(current_image)
+            # image_max = np.max(current_image)
+            # current_image = (current_image - image_min)/(image_max-image_min)
+
+            current_image = current_image[0, :, :, 0]
 
 
-            # maybe can replace by simple forward prop and later add merging of 8 images:
-            current_image = produce_test_image(current_image, current_scale, sess)
+            # # maybe can replace by simple forward prop and later add merging of 8 images:
+            # current_image = produce_test_image(current_image, current_scale).eval(session = sess)
+
+            cv2.imwrite('./Results/abe{}.png'.format(current_scale), (current_image*255).astype('uint8'))
+
+            # cv2.imshow('result scale {}'.format(current_scale), current_image)
+            # cv2.waitKey(0)
+
 
     return current_image
 
@@ -414,9 +405,12 @@ def ZSSR(image_path, desired_scale, verbose = False):
 def main(_):
     t0 = time()
 
-    result = ZSSR(EARTH_PATH, 2, verbose=True)
+    # result = ZSSR(EARTH_PATH, 2, verbose=True)
+    result = ZSSR(ABE_PATH, 2, verbose=True)
 
-    cv2.imshow('result',result)
+
+
+    # cv2.imshow('result',result)
 
 
     print("Took {} seconds".format(time()-t0))
